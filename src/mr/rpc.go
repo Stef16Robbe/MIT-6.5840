@@ -10,10 +10,20 @@ import "os"
 import "strconv"
 
 // Add your RPC definitions here.
+type TaskType int16
+
+const (
+	Map TaskType = iota
+	Reduce
+)
+
 type TaskArgs struct{}
 
 type TaskReply struct {
-	Filename string
+	Filename  string
+	TaskType  TaskType
+	NReduce   int
+	MapNumber int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

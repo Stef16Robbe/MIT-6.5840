@@ -9,20 +9,30 @@ import (
 )
 
 type Coordinator struct {
+	nReduce           int
 	availableMapTasks map[string]bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
+	i := 0
 	for k, v := range c.availableMapTasks {
 		if v {
 			reply.Filename = k
+			reply.TaskType = Map
+			reply.NReduce = c.nReduce
+			reply.MapNumber = i
 			c.availableMapTasks[k] = false
+			log.Printf("Assigned task nr %v, %v to worker\n", i, k)
+			return nil
 		}
+		i++
 	}
 
-	log.Println("no available map tasks")
+	// TODO: check for reduce tasks
+
+	log.Println("no available tasks")
 	return nil
 }
 
@@ -61,6 +71,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for _, f := range files {
 		c.availableMapTasks[f] = true
 	}
+	c.nReduce = nReduce
+
+	log.Println("Coordinator starting...")
 
 	c.server()
 	return &c
