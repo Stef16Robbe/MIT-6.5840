@@ -27,14 +27,56 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	task := CallRequestTask()
-	log.Printf("Worker %v starting...\n", task.MapNumber)
+	for {
+		task, ok := requestTask()
 
-	//
-	// read each input file,
-	// pass it to Map,
-	// accumulate the intermediate Map output.
-	//
+		if !ok {
+			// RPC failed, coordinator probably done
+			log.Println("Cannot contact coordinator or received no task, exiting")
+			break
+		}
+
+		switch task.TaskType {
+		case Map:
+			log.Printf("Starting mapping (#%v)...\n", task.MapNumber)
+			perform_mapping(mapf, task)
+			ok := reportFinishedTask(Map, task.Filename)
+			if !ok {
+				break
+			}
+		case Reduce:
+			log.Println("Reduce")
+			log.Printf("Starting reducing (%v)...\n", task.Filename)
+			perform_reduce(reducef, task)
+		case Done:
+			log.Println("Done")
+		}
+	}
+}
+
+func perform_reduce(reducef func(string, []string) string, task TaskReply) {
+	file, err := os.Open(task.Filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", task.Filename)
+	}
+
+	var kva []KeyValue
+	dec := json.NewDecoder(file)
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			break
+		}
+		kva = append(kva, kv)
+	}
+
+	// the reduce function wants a list that contains all occurences
+	// of a particular word
+	// question is how do we get there in a .... smart way?
+	fmt.Println(kva)
+}
+
+func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply) {
 	file, err := os.Open(task.Filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", task.Filename)
@@ -43,17 +85,12 @@ func Worker(mapf func(string, string) []KeyValue,
 	if err != nil {
 		log.Fatalf("cannot read %v", task.Filename)
 	}
-	file.Close()
 
-	if task.TaskType == Map {
-		perform_mapping(mapf, task, content)
-	} else {
-		// TODO: reduce
+	err = file.Close()
+	if err != nil {
+		log.Fatalf("err closing file %v", task.Filename)
 	}
 
-}
-
-func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply, content []byte) {
 	kvs := mapf(task.Filename, string(content))
 	log.Printf("mapped file: %v", task.Filename)
 	intermediate := make(map[int][]KeyValue)
@@ -63,39 +100,64 @@ func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply, conte
 	}
 
 	for i := 0; i < task.NReduce; i++ {
-		filename := fmt.Sprintf("mr-%d-%d", task.MapNumber, i)
+		filename := fmt.Sprintf("mr-%v-%v", task.MapNumber, i)
 		file, _ := os.Create(filename)
 		enc := json.NewEncoder(file)
 		for _, kv := range intermediate[i] {
-			enc.Encode(&kv)
+			err = enc.Encode(&kv)
+			if err != nil {
+				log.Fatalf("err JSON encoding key %v", kv)
+			}
 		}
-		file.Close()
+		err = file.Close()
+		if err != nil {
+			log.Fatalf("err closing file %v", task.Filename)
+		}
 	}
 }
 
-func CallRequestTask() TaskReply {
+func requestTask() (TaskReply, bool) {
 	reply := TaskReply{}
 	args := TaskArgs{}
 
 	ok := call("Coordinator.GetTask", &args, &reply)
-	if !ok {
-		log.Println("RPC Call failed")
-		os.Exit(1)
+	if ok {
+		if reply.Filename == "" {
+			log.Printf("received 'nil' task, looks like we're done")
+			return reply, false
+		}
+		log.Printf("received task: %v\n", reply)
+		return reply, true
+	} else {
+		log.Println("(GetTask) RPC Call failed - coordinator likely finished")
+		return reply, false
 	}
+}
 
-	log.Printf("received task: %v\n", reply)
-	return reply
+func reportFinishedTask(tt TaskType, filename string) bool {
+	args := FinishedTaskArgs{TaskType: tt, Filename: filename}
+	ok := call("Coordinator.FinishTask", &args, nil)
+
+	if ok {
+		log.Printf("succesfully reported finished task")
+		return true
+	} else {
+		log.Println("(FinishTask) RPC Call failed - coordinator likely finished")
+		return false
+	}
 }
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+func call(rpcname string, args any, reply any) bool {
 	sockname := coordinatorSock()
+
+	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Printf("error dialing: %v", err)
+		return false
 	}
 	defer c.Close()
 
@@ -104,6 +166,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	log.Printf("error calling coordinator: %v\n", err)
 	return false
 }

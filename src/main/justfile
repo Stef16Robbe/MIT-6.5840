@@ -2,5 +2,5 @@ coordinate:
     go build -buildmode=plugin ../mrapps/wc.go && sh -c 'rm -f mr-out*' && go run mrcoordinator.go pg-*.txt
 
 work:
-    go run mrworker.go wc.so
+    go build -buildmode=plugin ../mrapps/wc.go && go run mrworker.go wc.so
 

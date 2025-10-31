@@ -15,6 +15,7 @@ type TaskType int16
 const (
 	Map TaskType = iota
 	Reduce
+	Done
 )
 
 type TaskArgs struct{}
@@ -24,6 +25,15 @@ type TaskReply struct {
 	TaskType  TaskType
 	NReduce   int
 	MapNumber int
+}
+
+type FinishedTaskArgs struct {
+	TaskType TaskType
+	Filename string
+}
+
+type FinishedTaskReply struct {
+	Die bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
