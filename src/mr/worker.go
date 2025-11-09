@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 // Map functions return a slice of KeyValue.
@@ -40,19 +41,20 @@ func Worker(mapf func(string, string) []KeyValue,
 		case Map:
 			log.Printf("Starting mapping (#%v)...\n", task.MapNumber)
 			perform_mapping(mapf, task)
-			ok := reportFinishedTask(Map, task.Filename)
+			ok := reportFinishedTask(Map, task.Filename, task.MapNumber)
 			if !ok {
-				log.Fatal("Could not report that task was finished")
+				log.Println("Could not report that map task was finished")
 			}
 		case Reduce:
-			log.Printf("Starting reducing (%v)...\n", task.MapNumber)
+			log.Printf("Starting reducing (reduce task #%v)...\n", task.MapNumber)
 			perform_reduce(reducef, task)
-			ok := reportFinishedTask(Reduce, task.Filename)
+			ok := reportFinishedTask(Reduce, "", task.MapNumber)
 			if !ok {
-				log.Fatal("Could not report that task was finished")
+				log.Println("Could not report that reduce task was finished")
 			}
 		case Done:
-			log.Println("Done")
+			log.Println("All tasks done, exiting")
+			return
 		}
 	}
 }
@@ -60,30 +62,39 @@ func Worker(mapf func(string, string) []KeyValue,
 func perform_reduce(reducef func(string, []string) string, task TaskReply) {
 	var kva []KeyValue
 
-	reduceTask := 0
+	reduceTaskNumber := task.MapNumber // This is actually the reduce task number
+
+	// Read intermediate files from ALL map tasks for this reduce task
+	// Files are named mr-{mapTaskNumber}-{reduceTaskNumber}
+	mapTaskNumber := 0
 	for {
-		filename := fmt.Sprintf("mr-%d-%d", task.MapNumber, reduceTask)
-		log.Printf("Reading file %v\n", filename)
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNumber, reduceTaskNumber)
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Printf("cannot open %v", filename)
+			// No more map task files to read
+			log.Printf("Finished reading intermediate files (tried %v)\n", filename)
 			break
 		}
 
+		log.Printf("Reading file %v\n", filename)
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
-				// it's ok to err on EOF
-				// since go errors kinda suck we will just continue on any errors
+				// EOF or decode error
 				break
 			}
 			kva = append(kva, kv)
 		}
 
 		file.Close()
-		reduceTask++
+		mapTaskNumber++
 	}
+
+	// Sort by key for consistent output
+	sort.Slice(kva, func(i, j int) bool {
+		return kva[i].Key < kva[j].Key
+	})
 
 	// Group values by key
 	keyToValues := make(map[string][]string)
@@ -91,18 +102,33 @@ func perform_reduce(reducef func(string, []string) string, task TaskReply) {
 		keyToValues[kv.Key] = append(keyToValues[kv.Key], kv.Value)
 	}
 
-	filename := fmt.Sprintf("mr-out-%v", task.MapNumber)
-	file, err := os.Create(filename)
+	// Create output file
+	filename := fmt.Sprintf("mr-out-%v", reduceTaskNumber)
+	tmpfile := fmt.Sprintf("mr-out-%v-tmp", reduceTaskNumber)
+	file, err := os.Create(tmpfile)
 	if err != nil {
-		log.Fatalf("Failed creating reduce output file %v: %v", filename, err)
+		log.Fatalf("Failed creating reduce output file %v: %v", tmpfile, err)
 	}
 
-	// Now call reduce on each key with all its values
-	for key, values := range keyToValues {
-		output := reducef(key, values)
+	// Get keys in sorted order for deterministic output
+	keys := make([]string, 0, len(keyToValues))
+	for key := range keyToValues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Call reduce on each key with all its values
+	for _, key := range keys {
+		output := reducef(key, keyToValues[key])
 		fmt.Fprintf(file, "%v %v\n", key, output)
 	}
+
 	file.Close()
+
+	// Atomically rename temp file to final output
+	os.Rename(tmpfile, filename)
+
+	log.Printf("Reduced to: %v\n", filename)
 }
 
 func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply) {
@@ -121,28 +147,46 @@ func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply) {
 	}
 
 	kvs := mapf(task.Filename, string(content))
-	log.Printf("mapped file: %v", task.Filename)
+	log.Printf("Mapped file: %v, produced %v key-value pairs", task.Filename, len(kvs))
+
+	// Partition into intermediate files by reduce task number
 	intermediate := make(map[int][]KeyValue)
 	for _, kv := range kvs {
 		reduceNumber := ihash(kv.Key) % task.NReduce
 		intermediate[reduceNumber] = append(intermediate[reduceNumber], kv)
 	}
 
+	// Write intermediate files atomically using temp files
 	for i := 0; i < task.NReduce; i++ {
 		filename := fmt.Sprintf("mr-%v-%v", task.MapNumber, i)
-		file, _ := os.Create(filename)
+		tmpfilename := fmt.Sprintf("mr-%v-%v-tmp", task.MapNumber, i)
+
+		file, err := os.Create(tmpfilename)
+		if err != nil {
+			log.Fatalf("Failed to create temp file %v: %v", tmpfilename, err)
+		}
+
 		enc := json.NewEncoder(file)
 		for _, kv := range intermediate[i] {
 			err = enc.Encode(&kv)
 			if err != nil {
-				log.Fatalf("err JSON encoding key %v", kv)
+				log.Fatalf("err JSON encoding key %v: %v", kv, err)
 			}
 		}
+
 		err = file.Close()
 		if err != nil {
-			log.Fatalf("err closing file %v", task.Filename)
+			log.Fatalf("err closing file %v: %v", tmpfilename, err)
+		}
+
+		// Atomically rename temp file to final name
+		err = os.Rename(tmpfilename, filename)
+		if err != nil {
+			log.Fatalf("err renaming file %v to %v: %v", tmpfilename, filename, err)
 		}
 	}
+
+	log.Printf("Wrote %v intermediate files for map task %v", task.NReduce, task.MapNumber)
 }
 
 func requestTask() (TaskReply, bool) {
@@ -151,11 +195,16 @@ func requestTask() (TaskReply, bool) {
 
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if ok {
-		if reply.Filename == "" {
-			log.Printf("received 'nil' task, looks like we're done")
+		if reply.TaskType == Done {
+			log.Printf("Coordinator says all work is done")
+			return reply, true
+		}
+		if reply.Filename == "" && reply.TaskType != Reduce {
+			log.Printf("Received 'nil' task, no work available")
 			return reply, false
 		}
-		log.Printf("received task: %v\n", reply)
+		log.Printf("Received task: type=%v, file=%v, mapNumber=%v\n",
+			reply.TaskType, reply.Filename, reply.MapNumber)
 		return reply, true
 	} else {
 		log.Println("(GetTask) RPC Call failed - coordinator likely finished")
@@ -163,12 +212,17 @@ func requestTask() (TaskReply, bool) {
 	}
 }
 
-func reportFinishedTask(tt TaskType, filename string) bool {
-	args := FinishedTaskArgs{TaskType: tt, Filename: filename}
-	ok := call("Coordinator.FinishTask", &args, nil)
+func reportFinishedTask(tt TaskType, filename string, taskNumber int) bool {
+	args := FinishedTaskArgs{
+		TaskType:   tt,
+		Filename:   filename,
+		TaskNumber: taskNumber,
+	}
+	reply := FinishedTaskReply{}
+	ok := call("Coordinator.FinishTask", &args, &reply)
 
 	if ok {
-		log.Printf("succesfully reported finished task")
+		log.Printf("Successfully reported finished task: type=%v, number=%v", tt, taskNumber)
 		return true
 	} else {
 		log.Println("(FinishTask) RPC Call failed - coordinator likely finished")
@@ -182,7 +236,6 @@ func reportFinishedTask(tt TaskType, filename string) bool {
 func call(rpcname string, args any, reply any) bool {
 	sockname := coordinatorSock()
 
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Printf("error dialing: %v", err)

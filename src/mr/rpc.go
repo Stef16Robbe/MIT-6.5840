@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 // Add your RPC definitions here.
 type TaskType int16
@@ -24,12 +26,13 @@ type TaskReply struct {
 	Filename  string
 	TaskType  TaskType
 	NReduce   int
-	MapNumber int
+	MapNumber int // For Map tasks: the map task number. For Reduce tasks: the reduce task number
 }
 
 type FinishedTaskArgs struct {
-	TaskType TaskType
-	Filename string
+	TaskType   TaskType
+	Filename   string // Only used for Map tasks
+	TaskNumber int    // For Map tasks: map number. For Reduce tasks: reduce number
 }
 
 type FinishedTaskReply struct {
