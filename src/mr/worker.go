@@ -42,12 +42,15 @@ func Worker(mapf func(string, string) []KeyValue,
 			perform_mapping(mapf, task)
 			ok := reportFinishedTask(Map, task.Filename)
 			if !ok {
-				break
+				log.Fatal("Could not report that task was finished")
 			}
 		case Reduce:
-			log.Println("Reduce")
-			log.Printf("Starting reducing (%v)...\n", task.Filename)
+			log.Printf("Starting reducing (%v)...\n", task.MapNumber)
 			perform_reduce(reducef, task)
+			ok := reportFinishedTask(Reduce, task.Filename)
+			if !ok {
+				log.Fatal("Could not report that task was finished")
+			}
 		case Done:
 			log.Println("Done")
 		}
@@ -55,25 +58,51 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func perform_reduce(reducef func(string, []string) string, task TaskReply) {
-	file, err := os.Open(task.Filename)
-	if err != nil {
-		log.Fatalf("cannot open %v", task.Filename)
-	}
-
 	var kva []KeyValue
-	dec := json.NewDecoder(file)
+
+	reduceTask := 0
 	for {
-		var kv KeyValue
-		if err := dec.Decode(&kv); err != nil {
+		filename := fmt.Sprintf("mr-%d-%d", task.MapNumber, reduceTask)
+		log.Printf("Reading file %v\n", filename)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Printf("cannot open %v", filename)
 			break
 		}
-		kva = append(kva, kv)
+
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				// it's ok to err on EOF
+				// since go errors kinda suck we will just continue on any errors
+				break
+			}
+			kva = append(kva, kv)
+		}
+
+		file.Close()
+		reduceTask++
 	}
 
-	// the reduce function wants a list that contains all occurences
-	// of a particular word
-	// question is how do we get there in a .... smart way?
-	fmt.Println(kva)
+	// Group values by key
+	keyToValues := make(map[string][]string)
+	for _, kv := range kva {
+		keyToValues[kv.Key] = append(keyToValues[kv.Key], kv.Value)
+	}
+
+	filename := fmt.Sprintf("mr-out-%v", task.MapNumber)
+	file, err := os.Create(filename)
+	if err != nil {
+		log.Fatalf("Failed creating reduce output file %v: %v", filename, err)
+	}
+
+	// Now call reduce on each key with all its values
+	for key, values := range keyToValues {
+		output := reducef(key, values)
+		fmt.Fprintf(file, "%v %v\n", key, output)
+	}
+	file.Close()
 }
 
 func perform_mapping(mapf func(string, string) []KeyValue, task TaskReply) {

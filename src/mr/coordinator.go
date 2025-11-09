@@ -32,6 +32,8 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 		}
 	}
 
+	// TODO assign tasks based on mapnr
+	// TODO rename mapnr to tasknr or smth
 	for filename, available := range c.reduceTasks {
 		if available {
 			reply.Filename = filename
@@ -67,10 +69,7 @@ func (c *Coordinator) server() {
 	}
 	rpc.HandleHTTP()
 	sockname := coordinatorSock()
-	err = os.Remove(sockname)
-	if err != nil {
-		log.Fatalf("error removing RPC socket: %v", err)
-	}
+	_ = os.Remove(sockname)
 
 	// l, e := net.Listen("tcp", ":1234")
 	l, e := net.Listen("unix", sockname)
